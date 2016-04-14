@@ -23,7 +23,7 @@ public abstract class RetryHandler<T> {
 	private static final Logger LOGGER = LoggerFactory.getLogger(RetryHandler.class);
 
 	public static boolean			initialize	= false;
-	public volatile static boolean	shutdown	= false;
+	public volatile static boolean		shutdown	= false;
 	public static final Object		lock		= new Object();
 	public static final long		TIMEOUT		= 30 * 1000;
 
@@ -33,7 +33,14 @@ public abstract class RetryHandler<T> {
 
 	@PostConstruct
 	public void init() {
-		executor = Executors.newFixedThreadPool(1);
+		executor = Executors.newFixedThreadPool(1, new ThreadFactory() {
+			private AtomicInteger threadId = new AtomicInteger(1);
+			@Override
+			public Thread newThread(Runnable r) {
+				return new Thread(r, "retry-thread-" + threadId.getAndIncrement());
+			}
+		});
+
 	}
 
 	@SuppressWarnings("null")
