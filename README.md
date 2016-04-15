@@ -1,6 +1,6 @@
 # RetryFramework
 It will persist the request object as json in database and retry with given time-interval and attempts.
-
+https://sankiid.wordpress.com/2016/04/14/retry-framework/
 
 It will need the below database schema:
 
