@@ -1,7 +1,10 @@
 package com.sandeep.retry.framework.dao;
 
-import java.util.List;
-import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+
+import com.sandeep.retry.framework.model.RetryEntity;
+import com.sandeep.retry.framework.model.RetryTask;
+import com.sandeep.retry.framework.model.RetryTaskResponse;
 /**
  * 
  * @author sandeep
