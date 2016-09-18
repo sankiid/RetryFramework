@@ -9,10 +9,10 @@ import java.util.Map;
  */
 public interface IRetryDao {
 
-	<T> void save(final List<T> obj, final String source, final String destination, final int maxRetryCount, final int timeInterval, final Class<T> klass);
-	
-	<T> Map<Integer, T> getData(String destination, final Class<T> klass);
-	
-	void updateData(Map<Integer, Boolean> executeResponse);
-	
+	<T> void save(final RetryEntity<T> requestList, final String source, final String destination, final Class<T> klass);
+
+	<T> void getRetryableTask(String source, String destination, Class<T> klass, BlockingQueue<RetryTask<T>> queue);
+
+	void updateTaskResponse(RetryTaskResponse response);
+
 }
