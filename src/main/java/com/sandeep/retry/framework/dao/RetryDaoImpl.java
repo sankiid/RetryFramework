@@ -29,110 +29,126 @@ import com.google.gson.Gson;
  */
 @Repository("retryDao")
 public class RetryDaoImpl implements IRetryDao {
-	private static final Logger LOGGER = LoggerFactory.getLogger(RetryDaoImpl.class);
+	private static final Logger				LOGGER				= LoggerFactory.getLogger(RetryDaoImpl.class);
+
+	private static final int				UPDATE_BATCH_SIZE	= 50;
 
 	@Autowired
-	private JdbcTemplate	jdbcTemplate;
-	private Gson			gson;
+	private JdbcTemplate					jdbcTemplate;
+	private Gson							gson;
+	private ConcurrentMap<Long, Boolean>	producedIds			= new ConcurrentHashMap<>();
 
 	@PostConstruct
 	public void init() {
 		gson = new Gson();
 	}
 
+	@SuppressWarnings("resource")
 	@Override
-	public <T> void save(final List<T> obj,  final String source, final String destination, final int maxRetryCount,
-			final int timeInterval, final Class<T> klass) {
-		LOGGER.info("Inside save()");
-		try {
-			long newTime = System.currentTimeMillis() + (timeInterval * 1000);
-			final Timestamp nextTime = new Timestamp(newTime);
-			String sql = "INSERT INTO `retry_events` ( `request`, `update_time`, `source`, `destination`,`max_retry_count`,`time_interval`,`next_time`) VALUES(?,now(),?,?,?,?,?)";
-			jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
-
-				@Override
-				public void setValues(PreparedStatement ps, int i) throws SQLException {
-					T request = obj.get(i);
-					ps.setString(1, gson.toJson(request, klass));
-					ps.setString(2, source);
-					ps.setString(3, destination);
-					ps.setInt(4, maxRetryCount);
-					ps.setInt(5, timeInterval);
-					ps.setTimestamp(6, nextTime);
-				}
-
-				@Override
-				public int getBatchSize() {
-					return obj.size();
-				}
-			});
-
-		} catch (Exception ex) {
-			LOGGER.error("Error::: ", ex);
+	public <T> void save(final RetryEntity<T> entity, final String source, final String destination, final Class<T> klass) {
+		if (source == null || destination == null || klass == null) {
+			throw new RuntimeException("Please register retry service before use");
 		}
-		LOGGER.info("Exiting save()");
+		final Timestamp nextTime = new Timestamp(System.currentTimeMillis());
+		StringBuilder query = new StringBuilder();
+		query.append("INSERT INTO `cashback_automation`.`retry_events` ")
+				.append("(`request`,`update_time`,`source`,`destination`,`max_retry_count`,`time_interval`,`next_time`)")
+				.append(" VALUES(?,?,?,?,?,?,?)");
+
+		jdbcTemplate.update(query.toString(), new PreparedStatementSetter() {
+
+			@Override
+			public void setValues(PreparedStatement ps) throws SQLException {
+				final String jsonReq = gson.toJson(entity.getRequest(), klass);
+
+				ps.setString(1, jsonReq);
+				ps.setTimestamp(2, new Timestamp(new Date().getTime()));
+				ps.setString(3, source);
+				ps.setString(4, destination);
+				ps.setInt(5, entity.getMaxRetryCount());
+				ps.setInt(6, entity.getTimeInterval());
+				ps.setTimestamp(7, nextTime);
+			}
+		});
 	}
 
 	@Override
-	public <T> Map<Integer, T> getData(String destination, final Class<T> klass) {
-		LOGGER.info("Inside getData()");
+	public <T> void getRetryableTask(String source, String destination, final Class<T> klass, final BlockingQueue<RetryTask<T>> queue) {
 		try {
-			String sql = "SELECT `request`,`id` FROM `cashback_automation`.`retry_events` where `destination` = ? AND `next_time` <= now() AND `fail_count` < `max_retry_count` order by `id` ASC LIMIT 50000";
-
-			return jdbcTemplate.query(sql, new Object[] { destination }, new ResultSetExtractor<Map<Integer, T>>() {
+			String sql = "SELECT `request`,`id` FROM `cashback_automation`.`retry_events` where `source`=? AND `destination` = ? AND `next_time` <= now() AND `fail_count` < `max_retry_count` order by `id` ASC LIMIT 10000";
+			jdbcTemplate.query(sql, new Object[] { source, destination }, new ResultSetExtractor<Void>() {
 				@Override
-				public Map<Integer, T> extractData(ResultSet rs) throws SQLException, DataAccessException {
-					Map<Integer, T> map = new HashMap<>();
+				public Void extractData(ResultSet rs) throws SQLException, DataAccessException {
 					while (rs.next()) {
-						map.put(rs.getInt("id"), gson.fromJson(rs.getString("request"), klass));
+						try {
+							if (!producedIds.containsKey(rs.getLong("id"))) {
+								queue.put(new RetryTask<T>(rs.getLong("id"), gson.fromJson(rs.getString("request"), klass)));
+								producedIds.putIfAbsent(rs.getLong("id"), Boolean.TRUE);
+							}
+						} catch (Exception e) {
+							LOGGER.error("Error in db get ", e);
+						}
 					}
-					return map;
+					return null;
 				}
 			});
 		} catch (Exception e) {
 			LOGGER.error("Error in getData:::", e);
 		}
-		LOGGER.info("Exiting getData()");
-		return Collections.emptyMap();
 	}
 
 	@Override
-	public void updateData(Map<Integer, Boolean> executeResponse) {
-		LOGGER.info("Inside updateData()");
+	public void removeEntryBasedOnExternalAppId(List<String> externalAppUid) {
+		LOGGER.info("Inside removeEntryBasedOnExternalAppId");
 		try {
-			StringBuilder updateBuilder = new StringBuilder("(");
-			StringBuilder deleteBuilder = new StringBuilder("(");
-			int i = 0;
-			int j = 0;
-			Set<Integer> keys = executeResponse.keySet();
-			for (Integer key : keys) {
-				if (executeResponse.get(key)) {
-					if (i++ > 0) {
-						deleteBuilder.append(",");
+			StringBuilder builder = new StringBuilder();
+			int idx = 0;
+			for (String uid : externalAppUid) {
+				if (idx > 0) {
+					builder.append(",");
+				}
+				builder.append(uid);
+				if (++idx == UPDATE_BATCH_SIZE) {
+					try {
+						String sql = "DELETE FROM cashback_automation.retry_events WHERE external_application_uid in ( " + builder.toString() + ")";
+						jdbcTemplate.update(sql);
+					} catch (Exception e) {
+						LOGGER.error("Error in update ", e);
 					}
-					deleteBuilder.append(key);
-				} else if (!executeResponse.get(key)) {
-					if (j++ > 0) {
-						updateBuilder.append(",");
-					}
-					updateBuilder.append(key);
+					idx = 0;
+					builder = new StringBuilder();
 				}
 			}
-			updateBuilder.append(")");
-			deleteBuilder.append(")");
-			final String sqlUpdate = "UPDATE `cashback_automation`.`retry_events` set `fail_count` = `fail_count`+1 , `update_time` = now() , `next_time` = date_add(now(), INTERVAL `time_interval` SECOND) where id IN ";
-			final String sqlDelete = "DELETE FROM `cashback_automation`.`retry_events` where id IN ";
-			if (j > 0) {
-				jdbcTemplate.update(sqlUpdate + updateBuilder.toString());
-				LOGGER.info("Updated id: {}", updateBuilder.toString());
-			}
-			if (i > 0) {
-				jdbcTemplate.update(sqlDelete + deleteBuilder.toString());
-				LOGGER.info("deleted id: {}", deleteBuilder.toString());
+			if (idx > 0) {
+				try {
+					String sql = "DELETE FROM cashback_automation.retry_events WHERE external_application_uid in ( " + builder.toString() + ")";
+					jdbcTemplate.update(sql);
+				} catch (Exception e) {
+					LOGGER.error("Error in update ", e);
+				}
 			}
 		} catch (Exception e) {
-			LOGGER.error("Error in updateData:::", e);
+			LOGGER.error("Error in deleteRetryEventList ", e);
 		}
-		LOGGER.info("Exiting updateData()");
+		LOGGER.info("exiting removeEntryBasedOnExternalAppId");
 	}
+
+	@Override
+	public void updateTaskResponse(RetryTaskResponse response) {
+		LOGGER.debug("Inside updateTaskResponse");
+		try {
+			if (response.isStatus()) {
+				String sql = "DELETE FROM `cashback_automation`.`retry_events` where id = ?";
+				jdbcTemplate.update(sql, response.getId());
+			} else {
+				String sql = "UPDATE `cashback_automation`.`retry_events` set `fail_count` = `fail_count`+1 , `update_time` = now() , `next_time` = date_add(now(), INTERVAL `time_interval` SECOND) where id = ?";
+				jdbcTemplate.update(sql, response.getId());
+			}
+		} catch (Exception e) {
+			LOGGER.error("Error in updateTaskResponse ", e);
+		}
+		producedIds.remove(response.getId());
+		LOGGER.debug("exiting updateTaskResponse");
+	}
+
 }
