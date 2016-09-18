@@ -6,7 +6,7 @@ It will need the below database schema:
 
 CREATE TABLE `retry_events` (
   `id` int(10) NOT NULL AUTO_INCREMENT,
-  `request` varchar(500) NOT NULL,
+  `request` text NOT NULL,
   `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `next_time` timestamp NOT NULL DEFAULT '0000-00-00 00:00:00',
   `fail_count` smallint(6) DEFAULT '0',
@@ -15,5 +15,5 @@ CREATE TABLE `retry_events` (
   `destination` varchar(10) DEFAULT NULL,
   `time_interval` int(11) NOT NULL,
   PRIMARY KEY (`id`),
-  KEY `destination` (`destination`,`next_time`,`fail_count`)
+  KEY `des_src_idx` (`source`,`destination`,`next_time`,`fail_count`),
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
