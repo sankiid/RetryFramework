@@ -20,72 +20,141 @@ import org.springframework.beans.factory.annotation.Autowired;
  *
  */
 public abstract class RetryHandler<T> {
-	private static final Logger LOGGER = LoggerFactory.getLogger(RetryHandler.class);
 
-	public static boolean			initialize	= false;
-	public volatile static boolean		shutdown	= false;
-	public static final Object		lock		= new Object();
-	public static final long		TIMEOUT		= 30 * 1000;
-
+	private static final Logger					LOGGER				= LoggerFactory.getLogger(RetryHandler.class);
+	private static final int					CONSUMER_POOL_SIZE	= 10;
 	@Autowired
-	private IRetryService  	retryService;
-	private ExecutorService executor;
+	private IRetryDao							retryDao;
 
-	@PostConstruct
-	public void init() {
-		executor = Executors.newFixedThreadPool(1, new ThreadFactory() {
+	public volatile static boolean				shutdown			= false;
+
+	private volatile String						source;
+	private volatile String						destination;
+	private volatile Class<T>					klass;
+	private AtomicBoolean						registered			= new AtomicBoolean(false);
+
+	private ScheduledExecutorService			producerPool;
+	private ExecutorService						consumerPool;
+	private BlockingQueue<RetryTask<T>>			taskQueue			= null;
+	private BlockingQueue<RetryTaskResponse>	taskResponseQueue	= null;
+
+	/**
+	 * Register Retry Service before using it. The data in execute method is
+	 * available based on this service.
+	 * 
+	 * @param source
+	 * @param destination
+	 * @param klass
+	 * @param taskProducePerSeconds
+	 * @param nextWaitTimeInSeconds
+	 */
+	public void registerService(String source, String destination, Class<T> klass) {
+		if (!registered.getAndSet(true)) {
+			this.source = source;
+			this.destination = destination;
+			this.klass = klass;
+			initialize();
+		}
+	}
+
+	public void initialize() {
+		initializeThreadPool();
+		initializeQueues();
+		consumerRetryTaskResponse();
+		produceRetryTask();
+	}
+
+	private void initializeThreadPool() {
+		producerPool = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
 			private AtomicInteger threadId = new AtomicInteger(1);
+
 			@Override
 			public Thread newThread(Runnable r) {
-				return new Thread(r, "retry-thread-" + threadId.getAndIncrement());
+				return new Thread(r, "retry-producer-" + klass.getName() + "-" + threadId.getAndIncrement());
 			}
 		});
 
+		consumerPool = Executors.newFixedThreadPool(CONSUMER_POOL_SIZE, new ThreadFactory() {
+			private AtomicInteger threadId = new AtomicInteger(1);
+
+			@Override
+			public Thread newThread(Runnable r) {
+				return new Thread(r, "retry-consumer-" + klass.getName() + "-" + threadId.getAndIncrement());
+			}
+		});
 	}
 
-	@SuppressWarnings("null")
-	public void process(List<T> obj,  String source, final String destination, int maxRetryCount, int timeInterval,
-			final Class<T> klass) {
-		if (obj != null || !obj.isEmpty()) {
-			retryService.save(obj, source, destination, maxRetryCount, timeInterval, klass);
-		}
-		if (!initialize) {
-			initialize = true;
-			executor.execute(new Runnable() {
+	private void initializeQueues() {
+		taskQueue = new LinkedBlockingQueue<>(10000);
+		taskResponseQueue = new LinkedBlockingQueue<>();
+	}
+
+	private void consumerRetryTaskResponse() {
+		for (int i = 0; i < CONSUMER_POOL_SIZE; ++i) {
+			consumerPool.execute(new Runnable() {
 				@Override
 				public void run() {
+					LOGGER.debug("starting retry events comsumer thread.");
 					while (!shutdown) {
-						synchronized (lock) {
-							try {
-								lock.wait(TIMEOUT);
-							} catch (InterruptedException e) {
-								LOGGER.error("Lock Error::", e);
-							}
+						try {
+							RetryTaskResponse response = taskResponseQueue.take();
+							retryDao.updateTaskResponse(response);
+						} catch (Throwable e) {
+							System.gc();
+							LOGGER.error("Error in execution ", e);
 						}
-						Map<Integer, T> data = retryService.getData(destination, klass);
-						if (data == null || data.isEmpty()) {
-							continue;
-						}
-						Map<Integer, Boolean> executeResponse = execute(data);
-						retryService.updateData(executeResponse);
 					}
 				}
 			});
 		}
 	}
 
-	public void shutdownRetryHandler() {
-		shutdown = true;
-		if (executor != null) {
-			try {
-				executor.awaitTermination(5000, TimeUnit.MILLISECONDS);
-			} catch (InterruptedException e) {
-				e.printStackTrace();
+	private void produceRetryTask() {
+		execute(taskQueue, taskResponseQueue);
+		producerPool.scheduleAtFixedRate(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					retryDao.getRetryableTask(source, destination, klass, taskQueue);
+				} catch (Throwable t) {
+					System.gc();
+					LOGGER.error("Error in execution ", t);
+				}
 			}
-			executor.shutdown();
+		}, 10, 10, TimeUnit.SECONDS);
+	}
+
+	/**
+	 * 
+	 * @param requestList
+	 */
+	public void process(final RetryEntity<T> retryEntity) {
+		if (retryEntity != null) {
+			retryDao.save(retryEntity, source, destination, klass);
 		}
 	}
 
-	public abstract Map<Integer, Boolean> execute(Map<Integer, T> data);
+	@PreDestroy
+	public void shutdownRetryHandler() {
+		shutdown = true;
+		if (producerPool != null) {
+			try {
+				producerPool.awaitTermination(5000, TimeUnit.MILLISECONDS);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			producerPool.shutdown();
+		}
+		if (consumerPool != null) {
+			try {
+				consumerPool.awaitTermination(20000, TimeUnit.MILLISECONDS);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			consumerPool.shutdown();
+		}
+	}
+
+	public abstract void execute(BlockingQueue<RetryTask<T>> taskQueue, BlockingQueue<RetryTaskResponse> taskResponseQueue);
 
 }
