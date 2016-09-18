@@ -1,25 +1,18 @@
 package com.sandeep.retry.framework.handler;
 
-import java.util.concurrent.BlockingQueue;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
-import javax.annotation.PreDestroy;
+import javax.annotation.PostConstruct;
+import com.sandeep.retry.framework.dao.IRetryDao;
+import com.sandeep.retry.framework.service.IRetryService;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-
-import com.sandeep.retry.framework.dao.IRetryDao;
-import com.sandeep.retry.framework.model.RetryEntity;
-import com.sandeep.retry.framework.model.RetryTask;
-import com.sandeep.retry.framework.model.RetryTaskResponse;
 
 /**
  * 
