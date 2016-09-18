@@ -4,10 +4,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
-import java.util.Date;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import javax.annotation.PostConstruct;
 
@@ -15,16 +16,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.stereotype.Repository;
 
 import com.google.gson.Gson;
-import com.sandeep.retry.framework.model.RetryEntity;
-import com.sandeep.retry.framework.model.RetryTask;
-import com.sandeep.retry.framework.model.RetryTaskResponse;
-
 /**
  * 
  * @author sandeep
@@ -32,21 +29,23 @@ import com.sandeep.retry.framework.model.RetryTaskResponse;
  */
 @Repository("retryDao")
 public class RetryDaoImpl implements IRetryDao {
-	private static final Logger				LOGGER		= LoggerFactory.getLogger(RetryDaoImpl.class);
+	private static final Logger				LOGGER				= LoggerFactory.getLogger(RetryDaoImpl.class);
+
+	private static final int				UPDATE_BATCH_SIZE	= 50;
 
 	@Autowired
 	private JdbcTemplate					jdbcTemplate;
 	private Gson							gson;
-	private ConcurrentMap<Long, Boolean>	producedIds	= new ConcurrentHashMap<>();
+	private ConcurrentMap<Long, Boolean>	producedIds			= new ConcurrentHashMap<>();
 
 	@PostConstruct
 	public void init() {
 		gson = new Gson();
 	}
 
+	@SuppressWarnings("resource")
 	@Override
-	public <T> void save(final RetryEntity<T> entity, final String source, final String destination,
-			final Class<T> klass) {
+	public <T> void save(final RetryEntity<T> entity, final String source, final String destination, final Class<T> klass) {
 		if (source == null || destination == null || klass == null) {
 			throw new RuntimeException("Please register retry service before use");
 		}
@@ -74,8 +73,7 @@ public class RetryDaoImpl implements IRetryDao {
 	}
 
 	@Override
-	public <T> void getRetryableTask(String source, String destination, final Class<T> klass,
-			final BlockingQueue<RetryTask<T>> queue) {
+	public <T> void getRetryableTask(String source, String destination, final Class<T> klass, final BlockingQueue<RetryTask<T>> queue) {
 		try {
 			String sql = "SELECT `request`,`id` FROM `cashback_automation`.`retry_events` where `source`=? AND `destination` = ? AND `next_time` <= now() AND `fail_count` < `max_retry_count` order by `id` ASC LIMIT 10000";
 			jdbcTemplate.query(sql, new Object[] { source, destination }, new ResultSetExtractor<Void>() {
@@ -84,8 +82,7 @@ public class RetryDaoImpl implements IRetryDao {
 					while (rs.next()) {
 						try {
 							if (!producedIds.containsKey(rs.getLong("id"))) {
-								queue.put(new RetryTask<T>(rs.getLong("id"),
-										gson.fromJson(rs.getString("request"), klass)));
+								queue.put(new RetryTask<T>(rs.getLong("id"), gson.fromJson(rs.getString("request"), klass)));
 								producedIds.putIfAbsent(rs.getLong("id"), Boolean.TRUE);
 							}
 						} catch (Exception e) {
@@ -98,6 +95,42 @@ public class RetryDaoImpl implements IRetryDao {
 		} catch (Exception e) {
 			LOGGER.error("Error in getData:::", e);
 		}
+	}
+
+	@Override
+	public void removeEntryBasedOnExternalAppId(List<String> externalAppUid) {
+		LOGGER.info("Inside removeEntryBasedOnExternalAppId");
+		try {
+			StringBuilder builder = new StringBuilder();
+			int idx = 0;
+			for (String uid : externalAppUid) {
+				if (idx > 0) {
+					builder.append(",");
+				}
+				builder.append(uid);
+				if (++idx == UPDATE_BATCH_SIZE) {
+					try {
+						String sql = "DELETE FROM cashback_automation.retry_events WHERE external_application_uid in ( " + builder.toString() + ")";
+						jdbcTemplate.update(sql);
+					} catch (Exception e) {
+						LOGGER.error("Error in update ", e);
+					}
+					idx = 0;
+					builder = new StringBuilder();
+				}
+			}
+			if (idx > 0) {
+				try {
+					String sql = "DELETE FROM cashback_automation.retry_events WHERE external_application_uid in ( " + builder.toString() + ")";
+					jdbcTemplate.update(sql);
+				} catch (Exception e) {
+					LOGGER.error("Error in update ", e);
+				}
+			}
+		} catch (Exception e) {
+			LOGGER.error("Error in deleteRetryEventList ", e);
+		}
+		LOGGER.info("exiting removeEntryBasedOnExternalAppId");
 	}
 
 	@Override
